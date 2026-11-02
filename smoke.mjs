@@ -6,10 +6,11 @@ import assert from 'node:assert/strict';
 
 const URL = process.argv[2] || 'http://localhost:8123/';
 const chrome = run('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-  ['--headless=new', '--remote-debugging-port=9333', '--user-data-dir=/tmp/evo-chrome', '--window-size=430,800', 'about:blank']);
+  ['--headless=new', '--remote-debugging-port=9333', '--user-data-dir=/tmp/evo-chrome', '--window-size=430,800', '--disable-gpu', 'about:blank']);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-await sleep(1500);
-const [tab] = (await (await fetch('http://localhost:9333/json')).json()).filter(t => t.type === 'page');
+const guard = setTimeout(() => { console.error('TIMEOUT'); chrome.kill('SIGKILL'); process.exit(1); }, 90000);
+let tab;
+for (let i = 0; i < 30 && !tab; i++) { await sleep(300); try { tab = (await (await fetch('http://localhost:9333/json')).json()).find(t => t.type === 'page'); } catch {} }
 const ws = new WebSocket(tab.webSocketDebuggerUrl);
 await new Promise(r => ws.onopen = r);
 let id = 0; const wait = new Map(), errors = [];
@@ -25,6 +26,7 @@ const shot = async f => writeFileSync(f, Buffer.from((await cdp('Page.captureScr
 
 try {
   await cdp('Runtime.enable'); await cdp('Page.enable');
+  await cdp('Emulation.setFocusEmulationEnabled', { enabled: true }); // otherwise headless throttles rAF to ~1 fps
   await cdp('Page.navigate', { url: URL }); await sleep(2500);
   await shot('/tmp/evo-menu.png');
   await js(`document.getElementById('play').click()`);
@@ -32,7 +34,7 @@ try {
   for (let i = 0; i < 40; i++) { await js(`aimX=${[120, 200, 280][i % 3]}; drop()`); await sleep(520); }
   await sleep(1500);
   await shot('/tmp/evo-play.png');
-  const s = await js(`({score, maxTier, n: bodies().length, state})`);
+  const s = await js(`new Promise(r => { let n = 0, t = performance.now(); (function f() { n++; performance.now() - t > 1000 ? r({ fps: n, score, maxTier, n: bodies().length, state }) : requestAnimationFrame(f); })(); })`);
   console.log('after drops', s);
   assert.ok(s.score > 0 && s.maxTier >= 2, 'merges should happen');
 
@@ -49,4 +51,4 @@ try {
   await shot('/tmp/evo-over.png');
   assert.deepEqual(errors, [], 'no JS errors');
   console.log('OK');
-} finally { ws.close(); chrome.kill(); }
+} finally { clearTimeout(guard); ws.close(); chrome.kill('SIGKILL'); }
